@@ -1,4 +1,4 @@
-name: Build other web version
+name: Build and deploy other web version
 
 on:
   push:
@@ -10,10 +10,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
-  group: build-other
+  group: pages
   cancel-in-progress: true
 
 jobs:
@@ -30,8 +32,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -43,13 +43,52 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Build other web version
+      - name: Build web files
         run: npm run build
 
-      - name: Upload built web files as downloadable artifact
-        uses: actions/upload-artifact@v4
+      - name: Prepare GitHub Pages root files
+        working-directory: .
+        run: |
+          rm -rf site
+          mkdir -p site
+
+          # keep the app under /view
+          cp -a lifeRestart_other/view site/
+
+          # put shared static assets at site root so ../lib and ../public resolve correctly
+          cp -a lifeRestart_other/lib site/
+          cp -a lifeRestart_other/public site/
+          cp -a lifeRestart_other/data site/
+
+          # root redirect to the actual game page
+          cat > site/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8" />
+            <meta http-equiv="refresh" content="0; url=./view/index.html" />
+            <title>Redirecting...</title>
+          </head>
+          <body>
+            Redirecting to <a href="./view/index.html">game page</a>...
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: lifeRestart_other-web
-          path: lifeRestart_other/public
-          if-no-files-found: error
-          retention-days: 30
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

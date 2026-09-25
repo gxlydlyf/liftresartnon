@@ -1,4 +1,4 @@
-name: Build and deploy other web version
+name: Build and deploy single-file web version
 
 on:
   push:
@@ -15,72 +15,259 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: github-pages
   cancel-in-progress: true
 
 jobs:
   build:
+    name: Build single-file game
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: lifeRestart_other
 
     env:
       NODE_OPTIONS: --openssl-legacy-provider
 
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: lifeRestart_other/package.json
+
+      - name: Patch source to support embedded JSON data
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          file_path = Path("lifeRestart_other/src/index.js")
+          text = file_path.read_text(encoding="utf-8")
+
+          old = "globalThis.json = async fileName => await (await fetch(`../data/${fileName}.json`)).json();"
+          new = """globalThis.json = async fileName => {
+    if (globalThis.__EMBEDDED_DATA__?.[fileName]) {
+        return globalThis.__EMBEDDED_DATA__[fileName];
+    }
+
+    return await (await fetch(`../data/${fileName}.json`)).json();
+};"""
+
+          if old not in text:
+              raise SystemExit("Target code not found in lifeRestart_other/src/index.js")
+
+          file_path.write_text(text.replace(old, new), encoding="utf-8")
+          print("Patched index.js")
+          PY
+
+      - name: Patch package.json to add single script
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          package_path = Path("lifeRestart_other/package.json")
+          data = json.loads(package_path.read_text(encoding="utf-8"))
+
+          scripts = data.setdefault("scripts", {})
+          scripts["single"] = "node utils/create-single-file.mjs"
+
+          package_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          print("Patched package.json")
+          PY
+
+      - name: Create single-file generator in CI
+        shell: bash
+        run: |
+          mkdir -p lifeRestart_other/utils
+          cat > lifeRestart_other/utils/create-single-file.mjs <<'EOF'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { fileURLToPath } from 'node:url';
+
+          const currentFile = fileURLToPath(import.meta.url);
+          const projectDir = path.resolve(path.dirname(currentFile), '..');
+          const outputFile = path.join(projectDir, 'single.html');
+
+          const read = filePath => fs.readFileSync(filePath, 'utf8');
+
+          const escapeScript = content =>
+              content
+                  .replaceAll('</script', '<\\/script')
+                  .replaceAll('<!--', '<\\!--');
+
+          const escapeJsonForScript = value =>
+              JSON.stringify(value)
+                  .replaceAll('<', '\\u003c')
+                  .replaceAll('>', '\\u003e')
+                  .replaceAll('&', '\\u0026');
+
+          const toDataUri = filePath => {
+              const extension = path.extname(filePath).toLowerCase();
+              const mimeTypes = {
+                  '.woff2': 'font/woff2',
+                  '.woff': 'font/woff',
+                  '.ttf': 'font/ttf',
+                  '.png': 'image/png',
+                  '.jpg': 'image/jpeg',
+                  '.jpeg': 'image/jpeg',
+                  '.svg': 'image/svg+xml',
+                  '.gif': 'image/gif',
+              };
+
+              const mime = mimeTypes[extension] || 'application/octet-stream';
+              const content = fs.readFileSync(filePath).toString('base64');
+              return `data:${mime};base64,${content}`;
+          };
+
+          const inlineCssAssets = css =>
+              css.replace(/url\((['"]?)([^)'"]+)\1\)/g, (match, quote, assetPath) => {
+                  if (/^(data:|https?:|#)/i.test(assetPath)) {
+                      return match;
+                  }
+
+                  const assetFile = path.resolve(projectDir, 'view', assetPath);
+
+                  if (!fs.existsSync(assetFile)) {
+                      console.warn(`CSS asset not found: ${assetPath}`);
+                      return match;
+                  }
+
+                  return `url("${toDataUri(assetFile)}")`;
+              });
+
+          const htmlFile = path.join(projectDir, 'view', 'index.html');
+          const cssFile = path.join(projectDir, 'view', 'light.css');
+          const jqueryFile = path.join(projectDir, 'lib', 'jquery-3.6.0.min.js');
+          const domToImageFile = path.join(projectDir, 'lib', 'dom-to-image.min.js');
+          const bundleFile = path.join(projectDir, 'public', 'bundle.js');
+          const dataDirectory = path.join(projectDir, 'data');
+
+          let html = read(htmlFile);
+          const css = inlineCssAssets(read(cssFile));
+          const jquery = read(jqueryFile);
+          const domToImage = read(domToImageFile);
+          const bundle = read(bundleFile);
+
+          const embeddedData = {};
+
+          for (const fileName of fs.readdirSync(dataDirectory)) {
+              if (!fileName.endsWith('.json')) {
+                  continue;
+              }
+
+              const key = fileName.slice(0, -'.json'.length);
+              embeddedData[key] = JSON.parse(read(path.join(dataDirectory, fileName)));
+          }
+
+          html = html.replace(
+              /<link[^>]+href=["']light\.css["'][^>]*>\s*/i,
+              `<style>\n${css}\n</style>\n`,
+          );
+
+          html = html.replace(
+              /<link[^>]+manifest\.json["'][^>]*>\s*/i,
+              '',
+          );
+
+          html = html.replace(
+              /<script[^>]+jquery-3\.6\.0\.min\.js[^>]*><\/script>\s*/i,
+              '',
+          );
+
+          html = html.replace(
+              /<script[^>]+dom-to-image\.min\.js[^>]*><\/script>\s*/i,
+              '',
+          );
+
+          html = html.replace(
+              /<script[^>]+public\/bundle\.js[^>]*><\/script>\s*/i,
+              '',
+          );
+
+          html = html.replace(
+              /<script>\s*if\s*\('serviceWorker'[\s\S]*?<\/script>\s*/i,
+              '',
+          );
+
+          const dataScript = `
+          <script>
+          globalThis.__EMBEDDED_DATA__ = ${escapeJsonForScript(embeddedData)};
+          </script>
+          `;
+
+          const inlineScripts = `
+          <script>
+          ${escapeScript(jquery)}
+          </script>
+          <script>
+          ${escapeScript(domToImage)}
+          </script>
+          ${dataScript}
+          <script>
+          ${escapeScript(bundle)}
+          </script>
+          `;
+
+          html = html.replace('</body>', `${inlineScripts}\n</body>`);
+
+          fs.writeFileSync(outputFile, `<!doctype html>\n${html}`, 'utf8');
+
+          const size = fs.statSync(outputFile).size / 1024 / 1024;
+          console.log(`Generated: ${outputFile}`);
+          console.log(`Size: ${size.toFixed(2)} MB`);
+          EOF
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        working-directory: lifeRestart_other
+        run: |
+          npm install --no-audit --no-fund
 
-      - name: Build web files
-        run: npm run build
+      - name: Build Webpack bundle
+        working-directory: lifeRestart_other
+        run: |
+          npm run build
 
-      - name: Prepare GitHub Pages root files
-        working-directory: .
+      - name: Generate single-file HTML
+        working-directory: lifeRestart_other
+        run: |
+          npm run single
+
+      - name: Verify generated file
+        working-directory: lifeRestart_other
+        run: |
+          test -f single.html
+          test -s single.html
+          ls -lh single.html
+
+      - name: Prepare GitHub Pages directory
+        shell: bash
         run: |
           rm -rf site
           mkdir -p site
 
-          # keep the app under /view
-          cp -a lifeRestart_other/view site/
+          cp lifeRestart_other/single.html site/index.html
 
-          # put shared static assets at site root so ../lib and ../public resolve correctly
-          cp -a lifeRestart_other/lib site/
-          cp -a lifeRestart_other/public site/
-          cp -a lifeRestart_other/data site/
+          if [ -f lifeRestart_other/CNAME ]; then
+            cp lifeRestart_other/CNAME site/CNAME
+          fi
 
-          # root redirect to the actual game page
-          cat > site/index.html <<'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="UTF-8" />
-            <meta http-equiv="refresh" content="0; url=./view/index.html" />
-            <title>Redirecting...</title>
-          </head>
-          <body>
-            Redirecting to <a href="./view/index.html">game page</a>...
-          </body>
-          </html>
-          EOF
+      - name: Upload single-file artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lifeRestart-other-single-file
+          path: lifeRestart_other/single.html
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Upload Pages artifact
+      - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
+    name: Deploy to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
 
@@ -89,6 +276,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Deploy to GitHub Pages
+      - name: Deploy Pages artifact
         id: deployment
         uses: actions/deploy-pages@v4

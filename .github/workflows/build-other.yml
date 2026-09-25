@@ -35,8 +35,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Patch source to support embedded JSON data
-        shell: bash
+      - name: Patch source
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -45,42 +44,49 @@ jobs:
           text = file_path.read_text(encoding="utf-8")
 
           old = "globalThis.json = async fileName => await (await fetch(`../data/${fileName}.json`)).json();"
-          new = """globalThis.json = async fileName => {
-    if (globalThis.__EMBEDDED_DATA__?.[fileName]) {
-        return globalThis.__EMBEDDED_DATA__[fileName];
-    }
 
-    return await (await fetch(`../data/${fileName}.json`)).json();
-};"""
+          new = (
+              "globalThis.json = async fileName => {\\n"
+              "    if (globalThis.__EMBEDDED_DATA__?.[fileName]) {\\n"
+              "        return globalThis.__EMBEDDED_DATA__[fileName];\\n"
+              "    }\\n"
+              "\\n"
+              "    return await (await fetch(`../data/${fileName}.json`)).json();\\n"
+              "};"
+          )
 
-          if old not in text:
-              raise SystemExit("Target code not found in lifeRestart_other/src/index.js")
-
-          file_path.write_text(text.replace(old, new), encoding="utf-8")
-          print("Patched index.js")
+          if old in text:
+              text = text.replace(old, new)
+              file_path.write_text(text, encoding="utf-8")
+              print("Source patched")
+          else:
+              print("Source already patched or target not found")
           PY
 
-      - name: Patch package.json to add single script
-        shell: bash
+      - name: Add single-file build script
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
           package_path = Path("lifeRestart_other/package.json")
-          data = json.loads(package_path.read_text(encoding="utf-8"))
+          package = json.loads(package_path.read_text(encoding="utf-8"))
 
-          scripts = data.setdefault("scripts", {})
-          scripts["single"] = "node utils/create-single-file.mjs"
+          package.setdefault("scripts", {})
+          package["scripts"]["single"] = "node utils/create-single-file.mjs"
 
-          package_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-          print("Patched package.json")
+          package_path.write_text(
+              json.dumps(package, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print("Added single script")
           PY
 
-      - name: Create single-file generator in CI
-        shell: bash
+      - name: Create single-file generator
         run: |
           mkdir -p lifeRestart_other/utils
+
           cat > lifeRestart_other/utils/create-single-file.mjs <<'EOF'
           import fs from 'node:fs';
           import path from 'node:path';
@@ -103,99 +109,100 @@ jobs:
                   .replaceAll('>', '\\u003e')
                   .replaceAll('&', '\\u0026');
 
+          const mimeTypes = {
+              '.woff2': 'font/woff2',
+              '.woff': 'font/woff',
+              '.ttf': 'font/ttf',
+              '.png': 'image/png',
+              '.jpg': 'image/jpeg',
+              '.jpeg': 'image/jpeg',
+              '.svg': 'image/svg+xml',
+              '.gif': 'image/gif',
+          };
+
           const toDataUri = filePath => {
               const extension = path.extname(filePath).toLowerCase();
-              const mimeTypes = {
-                  '.woff2': 'font/woff2',
-                  '.woff': 'font/woff',
-                  '.ttf': 'font/ttf',
-                  '.png': 'image/png',
-                  '.jpg': 'image/jpeg',
-                  '.jpeg': 'image/jpeg',
-                  '.svg': 'image/svg+xml',
-                  '.gif': 'image/gif',
-              };
-
               const mime = mimeTypes[extension] || 'application/octet-stream';
               const content = fs.readFileSync(filePath).toString('base64');
               return `data:${mime};base64,${content}`;
           };
 
           const inlineCssAssets = css =>
-              css.replace(/url\((['"]?)([^)'"]+)\1\)/g, (match, quote, assetPath) => {
-                  if (/^(data:|https?:|#)/i.test(assetPath)) {
-                      return match;
-                  }
+              css.replace(
+                  /url\\((['"]?)([^)'"]+)\\1\\)/g,
+                  (match, quote, assetPath) => {
+                      if (/^(data:|https?:|#)/i.test(assetPath)) {
+                          return match;
+                      }
 
-                  const assetFile = path.resolve(projectDir, 'view', assetPath);
+                      const assetFile = path.resolve(
+                          projectDir,
+                          'view',
+                          assetPath,
+                      );
 
-                  if (!fs.existsSync(assetFile)) {
-                      console.warn(`CSS asset not found: ${assetPath}`);
-                      return match;
-                  }
+                      if (!fs.existsSync(assetFile)) {
+                          console.warn(`CSS asset not found: ${assetPath}`);
+                          return match;
+                      }
 
-                  return `url("${toDataUri(assetFile)}")`;
-              });
+                      return `url("${toDataUri(assetFile)}")`;
+                  },
+              );
 
-          const htmlFile = path.join(projectDir, 'view', 'index.html');
-          const cssFile = path.join(projectDir, 'view', 'light.css');
-          const jqueryFile = path.join(projectDir, 'lib', 'jquery-3.6.0.min.js');
-          const domToImageFile = path.join(projectDir, 'lib', 'dom-to-image.min.js');
-          const bundleFile = path.join(projectDir, 'public', 'bundle.js');
-          const dataDirectory = path.join(projectDir, 'data');
+          const viewDir = path.join(projectDir, 'view');
+          const dataDir = path.join(projectDir, 'data');
 
-          let html = read(htmlFile);
-          const css = inlineCssAssets(read(cssFile));
-          const jquery = read(jqueryFile);
-          const domToImage = read(domToImageFile);
-          const bundle = read(bundleFile);
+          let html = read(path.join(viewDir, 'index.html'));
+          const css = inlineCssAssets(read(path.join(viewDir, 'light.css')));
+          const jquery = read(
+              path.join(projectDir, 'lib', 'jquery-3.6.0.min.js'),
+          );
+          const domToImage = read(
+              path.join(projectDir, 'lib', 'dom-to-image.min.js'),
+          );
+          const bundle = read(path.join(projectDir, 'public', 'bundle.js'));
 
           const embeddedData = {};
 
-          for (const fileName of fs.readdirSync(dataDirectory)) {
-              if (!fileName.endsWith('.json')) {
-                  continue;
+          for (const fileName of fs.readdirSync(dataDir)) {
+              if (fileName.endsWith('.json')) {
+                  const key = fileName.slice(0, -5);
+                  embeddedData[key] = JSON.parse(
+                      read(path.join(dataDir, fileName)),
+                  );
               }
-
-              const key = fileName.slice(0, -'.json'.length);
-              embeddedData[key] = JSON.parse(read(path.join(dataDirectory, fileName)));
           }
 
           html = html.replace(
-              /<link[^>]+href=["']light\.css["'][^>]*>\s*/i,
-              `<style>\n${css}\n</style>\n`,
+              /<link[^>]+href=["']light\\.css["'][^>]*>\\s*/i,
+              `<style>\\n${css}\\n</style>\\n`,
           );
 
           html = html.replace(
-              /<link[^>]+manifest\.json["'][^>]*>\s*/i,
+              /<link[^>]+manifest\\.json["'][^>]*>\\s*/i,
               '',
           );
 
           html = html.replace(
-              /<script[^>]+jquery-3\.6\.0\.min\.js[^>]*><\/script>\s*/i,
+              /<script[^>]+jquery-3\\.6\\.0\\.min\\.js[^>]*><\\/script>\\s*/i,
               '',
           );
 
           html = html.replace(
-              /<script[^>]+dom-to-image\.min\.js[^>]*><\/script>\s*/i,
+              /<script[^>]+dom-to-image\\.min\\.js[^>]*><\\/script>\\s*/i,
               '',
           );
 
           html = html.replace(
-              /<script[^>]+public\/bundle\.js[^>]*><\/script>\s*/i,
+              /<script[^>]+public\\/bundle\\.js[^>]*><\\/script>\\s*/i,
               '',
           );
 
           html = html.replace(
-              /<script>\s*if\s*\('serviceWorker'[\s\S]*?<\/script>\s*/i,
+              /<script>\\s*if\\s*\\('serviceWorker'[\\s\\S]*?<\\/script>\\s*/i,
               '',
           );
-
-          const dataScript = `
-          <script>
-          globalThis.__EMBEDDED_DATA__ = ${escapeJsonForScript(embeddedData)};
-          </script>
-          `;
 
           const inlineScripts = `
           <script>
@@ -204,56 +211,56 @@ jobs:
           <script>
           ${escapeScript(domToImage)}
           </script>
-          ${dataScript}
+          <script>
+          globalThis.__EMBEDDED_DATA__ = ${escapeJsonForScript(embeddedData)};
+          </script>
           <script>
           ${escapeScript(bundle)}
           </script>
           `;
 
-          html = html.replace('</body>', `${inlineScripts}\n</body>`);
+          html = html.replace('</body>', `${inlineScripts}\\n</body>`);
 
-          fs.writeFileSync(outputFile, `<!doctype html>\n${html}`, 'utf8');
+          fs.writeFileSync(
+              outputFile,
+              `<!doctype html>\\n${html}`,
+              'utf8',
+          );
 
-          const size = fs.statSync(outputFile).size / 1024 / 1024;
-          console.log(`Generated: ${outputFile}`);
-          console.log(`Size: ${size.toFixed(2)} MB`);
+          console.log(`Generated ${outputFile}`);
+          console.log(
+              `Size: ${(fs.statSync(outputFile).size / 1024 / 1024).toFixed(2)} MB`,
+          );
           EOF
 
       - name: Install dependencies
         working-directory: lifeRestart_other
-        run: |
-          npm install --no-audit --no-fund
+        run: npm install --no-audit --no-fund
 
       - name: Build Webpack bundle
         working-directory: lifeRestart_other
-        run: |
-          npm run build
+        run: npm run build
 
-      - name: Generate single-file HTML
+      - name: Generate single HTML file
         working-directory: lifeRestart_other
-        run: |
-          npm run single
+        run: npm run single
 
-      - name: Verify generated file
-        working-directory: lifeRestart_other
+      - name: Verify output
         run: |
-          test -f single.html
-          test -s single.html
-          ls -lh single.html
+          test -s lifeRestart_other/single.html
+          ls -lh lifeRestart_other/single.html
 
-      - name: Prepare GitHub Pages directory
-        shell: bash
+      - name: Prepare Pages directory
         run: |
           rm -rf site
           mkdir -p site
-
           cp lifeRestart_other/single.html site/index.html
 
           if [ -f lifeRestart_other/CNAME ]; then
             cp lifeRestart_other/CNAME site/CNAME
           fi
 
-      - name: Upload single-file artifact
+      - name: Upload downloadable artifact
         uses: actions/upload-artifact@v4
         with:
           name: lifeRestart-other-single-file
@@ -261,7 +268,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload GitHub Pages artifact
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
@@ -276,6 +283,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Deploy Pages artifact
+      - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

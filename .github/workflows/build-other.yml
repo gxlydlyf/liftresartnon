@@ -35,37 +35,33 @@ jobs:
         with:
           node-version: 20
 
-      - name: Patch source
+      - name: Patch source for embedded data
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
 
           file_path = Path("lifeRestart_other/src/index.js")
           text = file_path.read_text(encoding="utf-8")
 
           old = "globalThis.json = async fileName => await (await fetch(`../data/${fileName}.json`)).json();"
+          new = """globalThis.json = async fileName => {
+              if (globalThis.__EMBEDDED_DATA__?.[fileName]) {
+                  return globalThis.__EMBEDDED_DATA__[fileName];
+              }
 
-          new = (
-              "globalThis.json = async fileName => {\\n"
-              "    if (globalThis.__EMBEDDED_DATA__?.[fileName]) {\\n"
-              "        return globalThis.__EMBEDDED_DATA__[fileName];\\n"
-              "    }\\n"
-              "\\n"
-              "    return await (await fetch(`../data/${fileName}.json`)).json();\\n"
-              "};"
-          )
+              return await (await fetch(`../data/${fileName}.json`)).json();
+          };"""
 
-          if old in text:
-              text = text.replace(old, new)
-              file_path.write_text(text, encoding="utf-8")
-              print("Source patched")
-          else:
-              print("Source already patched or target not found")
+          if old not in text:
+              raise SystemExit("The expected data-loader pattern was not found in src/index.js")
+
+          file_path.write_text(text.replace(old, new), encoding="utf-8")
+          print("Source patched")
           PY
 
-      - name: Add single-file build script
+      - name: Add single-file script to package.json
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           import json
           from pathlib import Path
 
@@ -77,9 +73,8 @@ jobs:
 
           package_path.write_text(
               json.dumps(package, ensure_ascii=False, indent=2) + "\n",
-              encoding="utf-8",
+              encoding="utf-8"
           )
-
           print("Added single script")
           PY
 
@@ -129,18 +124,13 @@ jobs:
 
           const inlineCssAssets = css =>
               css.replace(
-                  /url\\((['"]?)([^)'"]+)\\1\\)/g,
+                  /url\((['"]?)([^)'"]+)\1\)/g,
                   (match, quote, assetPath) => {
                       if (/^(data:|https?:|#)/i.test(assetPath)) {
                           return match;
                       }
 
-                      const assetFile = path.resolve(
-                          projectDir,
-                          'view',
-                          assetPath,
-                      );
-
+                      const assetFile = path.resolve(projectDir, 'view', assetPath);
                       if (!fs.existsSync(assetFile)) {
                           console.warn(`CSS asset not found: ${assetPath}`);
                           return match;
@@ -155,54 +145,42 @@ jobs:
 
           let html = read(path.join(viewDir, 'index.html'));
           const css = inlineCssAssets(read(path.join(viewDir, 'light.css')));
-          const jquery = read(
-              path.join(projectDir, 'lib', 'jquery-3.6.0.min.js'),
-          );
-          const domToImage = read(
-              path.join(projectDir, 'lib', 'dom-to-image.min.js'),
-          );
+          const jquery = read(path.join(projectDir, 'lib', 'jquery-3.6.0.min.js'));
+          const domToImage = read(path.join(projectDir, 'lib', 'dom-to-image.min.js'));
           const bundle = read(path.join(projectDir, 'public', 'bundle.js'));
 
           const embeddedData = {};
 
           for (const fileName of fs.readdirSync(dataDir)) {
               if (fileName.endsWith('.json')) {
-                  const key = fileName.slice(0, -5);
-                  embeddedData[key] = JSON.parse(
-                      read(path.join(dataDir, fileName)),
+                  embeddedData[fileName.slice(0, -5)] = JSON.parse(
+                      read(path.join(dataDir, fileName))
                   );
               }
           }
 
-          html = html.replace(
-              /<link[^>]+href=["']light\\.css["'][^>]*>\\s*/i,
-              `<style>\\n${css}\\n</style>\\n`,
-          );
-
-          html = html.replace(
-              /<link[^>]+manifest\\.json["'][^>]*>\\s*/i,
-              '',
-          );
-
-          html = html.replace(
-              /<script[^>]+jquery-3\\.6\\.0\\.min\\.js[^>]*><\\/script>\\s*/i,
-              '',
-          );
-
-          html = html.replace(
-              /<script[^>]+dom-to-image\\.min\\.js[^>]*><\\/script>\\s*/i,
-              '',
-          );
-
-          html = html.replace(
-              /<script[^>]+public\\/bundle\\.js[^>]*><\\/script>\\s*/i,
-              '',
-          );
-
-          html = html.replace(
-              /<script>\\s*if\\s*\\('serviceWorker'[\\s\\S]*?<\\/script>\\s*/i,
-              '',
-          );
+          html = html
+              .replace(
+                  /<link[^>]+href=["']light\.css["'][^>]*>\s*/i,
+                  `<style>\n${css}\n</style>\n`
+              )
+              .replace(/<link[^>]+manifest\.json["'][^>]*>\s*/i, '')
+              .replace(
+                  /<script[^>]+jquery-3\.6\.0\.min\.js[^>]*><\/script>\s*/i,
+                  ''
+              )
+              .replace(
+                  /<script[^>]+dom-to-image\.min\.js[^>]*><\/script>\s*/i,
+                  ''
+              )
+              .replace(
+                  /<script[^>]+public\/bundle\.js[^>]*><\/script>\s*/i,
+                  ''
+              )
+              .replace(
+                  /<script>\s*if\s*\('serviceWorker'[\s\S]*?<\/script>\s*/i,
+                  ''
+              );
 
           const inlineScripts = `
           <script>
@@ -219,18 +197,10 @@ jobs:
           </script>
           `;
 
-          html = html.replace('</body>', `${inlineScripts}\\n</body>`);
-
-          fs.writeFileSync(
-              outputFile,
-              `<!doctype html>\\n${html}`,
-              'utf8',
-          );
+          html = html.replace('</body>', `${inlineScripts}\n</body>`);
+          fs.writeFileSync(outputFile, `<!doctype html>\n${html}`, 'utf8');
 
           console.log(`Generated ${outputFile}`);
-          console.log(
-              `Size: ${(fs.statSync(outputFile).size / 1024 / 1024).toFixed(2)} MB`,
-          );
           EOF
 
       - name: Install dependencies

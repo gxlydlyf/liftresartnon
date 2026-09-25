@@ -18,12 +18,14 @@ concurrency:
 
 jobs:
   build:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
 
     defaults:
       run:
         working-directory: lifeRestart_other
+
+    env:
+      NODE_OPTIONS: --openssl-legacy-provider
 
     steps:
       - name: Check out repository
@@ -44,15 +46,10 @@ jobs:
       - name: Build other web version
         run: npm run build
 
-      - name: Commit generated web files
-        working-directory: .
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add lifeRestart_other/public
-          if git diff --cached --quiet; then
-            echo "No generated files changed."
-            exit 0
-          fi
-          git commit -m "build: generate other web version"
-          git push
+      - name: Upload built web files as downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lifeRestart_other-web
+          path: lifeRestart_other/public
+          if-no-files-found: error
+          retention-days: 30
